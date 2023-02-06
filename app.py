@@ -4,8 +4,9 @@ from flask import Flask, render_template, request, flash, redirect, session, g
 from flask_debugtoolbar import DebugToolbarExtension
 from sqlalchemy.exc import IntegrityError
 
-from forms import UserAddForm, LoginForm, MessageForm
-from models import db, connect_db, User, Message
+from forms import UserAddForm, LoginForm, MessageForm, UserEditForm
+from models import db, connect_db, User, Message, Likes
+import subprocess
 
 CURR_USER_KEY = "curr_user"
 
@@ -22,7 +23,18 @@ app.config['DEBUG_TB_INTERCEPT_REDIRECTS'] = True
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', "it's a secret")
 toolbar = DebugToolbarExtension(app)
 
+
+try:
+    command = "psql -c 'create database warbler'"
+    subprocess.call(command, shell=True)
+except:
+    print(Exception)
+
+
 connect_db(app)
+
+with app.app_context():
+    db.create_all()
 
 
 ##############################################################################
@@ -112,8 +124,9 @@ def login():
 @app.route('/logout')
 def logout():
     """Handle logout of user."""
-
-    # IMPLEMENT THIS
+    do_logout()
+    flash("Logged Out")
+    return redirect("/")
 
 
 ##############################################################################
@@ -177,6 +190,26 @@ def users_followers(user_id):
     return render_template('users/followers.html', user=user)
 
 
+@app.route('/users/<int:user_id>/likes')
+def users_likes(user_id):
+    """Show list of followers of this user."""
+
+    if not g.user:
+        flash("Access unauthorized.", "danger")
+        return redirect("/")
+
+    likes = [msg.id for msg in g.user.likes]
+    messages = (Message
+                .query
+                .filter(Message.id.in_(likes))
+                .order_by(Message.timestamp.desc())
+                .limit(100)
+                .all())
+
+    user = User.query.get_or_404(user_id)
+    return render_template('users/likes.html', user=user, messages=messages, likes = likes )
+
+
 @app.route('/users/follow/<int:follow_id>', methods=['POST'])
 def add_follow(follow_id):
     """Add a follow for the currently-logged-in user."""
@@ -208,10 +241,24 @@ def stop_following(follow_id):
 
 
 @app.route('/users/profile', methods=["GET", "POST"])
-def profile():
+def profile_edit():
     """Update profile for current user."""
+    form = UserEditForm()
 
-    # IMPLEMENT THIS
+    if form.validate_on_submit():
+        user = User.authenticate(form.username.data,
+                                 form.password.data)
+
+        if user:
+            form.populate_obj(g.user)
+            db.session.commit()
+            flash("Changes Saved", "success")
+            return redirect("/")
+
+        flash("Access unauthorized", 'danger')
+    
+    
+    return render_template("users/edit.html", form = form)
 
 
 @app.route('/users/delete', methods=["POST"])
@@ -229,6 +276,26 @@ def delete_user():
 
     return redirect("/signup")
 
+
+@app.route('/users/add_like/<int:message_id>', methods=["POST"])
+def add_like(message_id):
+    """Handles likes"""
+    
+    if g.user:
+        liked = Message.query.get(message_id)
+        if liked in g.user.likes:
+            g.user.likes = [like for like in g.user.likes if like != liked]
+        else:
+            g.user.likes.append(liked)
+            
+        db.session.commit()
+
+        return redirect("/")
+
+    flash("Not logged in", 'danger')
+    
+    
+    return redirect("/")
 
 ##############################################################################
 # Messages routes:
@@ -292,13 +359,19 @@ def homepage():
     """
 
     if g.user:
+        user_ids = [followed.id for followed in g.user.following]
+        user_ids.append(g.user.id)
+        
         messages = (Message
                     .query
+                    .filter(Message.user_id.in_(user_ids))
                     .order_by(Message.timestamp.desc())
                     .limit(100)
                     .all())
+        likes = [msg.id for msg in g.user.likes]
+        print(likes)
 
-        return render_template('home.html', messages=messages)
+        return render_template('home.html', messages=messages, likes=likes)
 
     else:
         return render_template('home-anon.html')
